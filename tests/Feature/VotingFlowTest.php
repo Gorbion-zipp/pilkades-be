@@ -16,7 +16,6 @@ function makeVoter(array $overrides = []): Voter
         'nik' => '5103010101900001',
         'name' => 'I Wayan Sudiarta',
         'birth_date' => '1990-01-01',
-        'rt_rw' => '001/002',
         'has_voted' => false,
     ], $overrides));
 }

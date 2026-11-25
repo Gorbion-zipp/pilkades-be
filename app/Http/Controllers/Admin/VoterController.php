@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Region;
 use App\Models\Voter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,14 +17,26 @@ class VoterController extends Controller
             'nik' => ['required', 'digits:16', Rule::unique('mongodb.voters', 'nik')],
             'name' => 'required|string|max:255',
             'birth_date' => 'required|date_format:Y-m-d',
-            'rt_rw' => 'nullable|string|max:50',
+            'banjar_id' => 'required|string',
         ]);
+
+        $banjar = Region::find($data['banjar_id']);
+
+        if (! $banjar || $banjar->level !== Region::LEVEL_BANJAR) {
+            return response()->json([
+                'message' => 'Banjar yang dipilih tidak valid.',
+                'errors' => ['banjar_id' => ['Banjar yang dipilih tidak valid.']],
+            ], 422);
+        }
 
         $voter = Voter::create([
             'nik' => $data['nik'],
             'name' => $data['name'],
             'birth_date' => $data['birth_date'],
-            'rt_rw' => $data['rt_rw'] ?? null,
+            'kabupaten_id' => $banjar->kabupaten_id,
+            'kecamatan_id' => $banjar->kecamatan_id,
+            'kelurahan_id' => $banjar->kelurahan_id,
+            'banjar_id' => (string) $banjar->_id,
             'has_voted' => false,
         ]);
 

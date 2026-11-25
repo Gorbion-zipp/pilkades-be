@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Candidate;
+use App\Models\Election;
 use App\Models\Vote;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,20 +13,61 @@ use Illuminate\Validation\Rule;
 
 class CandidateController extends Controller
 {
+    public function index(Request $request): JsonResponse
+    {
+        $query = Candidate::orderBy('candidate_number');
+
+        if ($electionId = $request->query('election_id')) {
+            $query->where('election_id', $electionId);
+        }
+
+        $candidates = $query->get();
+
+        return response()->json([
+            'candidates' => $candidates->map(fn (Candidate $c) => $c->toApi(
+                Vote::where('candidate_id', (string) $c->_id)->count()
+            ))->all(),
+        ]);
+    }
+
     public function store(Request $request): JsonResponse
     {
+        $electionId = $request->input('election_id');
+        $election = $electionId ? Election::find($electionId) : null;
+
+        if ($electionId && ! $election) {
+            return response()->json(['message' => 'Data pemilihan tidak ditemukan.'], 422);
+        }
+
+        $uniqueRule = Rule::unique('mongodb.candidates', 'candidate_number');
+        if ($electionId) {
+            $uniqueRule->where('election_id', (string) $electionId);
+        }
+
+        $viceRule = (! $election || $election->position_type === Election::POSITION_BUPATI)
+            ? 'required|string|max:255'
+            : 'nullable|string|max:255';
+
+        $partyRule = ($election && $election->position_type === Election::POSITION_DPRD)
+            ? 'required|string|max:255'
+            : 'nullable|string|max:255';
+
         $data = $request->validate([
-            'candidate_number' => ['required', 'string', 'max:10', Rule::unique('mongodb.candidates', 'candidate_number')],
+            'election_id' => 'nullable|string',
+            'candidate_number' => ['required', 'string', 'max:10', $uniqueRule],
             'name' => 'required|string|max:255',
-            'vice_name' => 'required|string|max:255',
+            'vice_name' => $viceRule,
+            'party_name' => $partyRule,
             'vision_mission' => 'nullable|string',
             'photo' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:2048',
         ]);
 
         $candidate = Candidate::create([
+            'election_id' => $election ? (string) $election->_id : null,
             'candidate_number' => $data['candidate_number'],
             'name' => $data['name'],
-            'vice_name' => $data['vice_name'],
+            'vice_name' => isset($data['vice_name']) && trim((string) $data['vice_name']) !== '' ? trim((string) $data['vice_name']) : null,
+            'party_name' => isset($data['party_name']) && trim((string) $data['party_name']) !== '' ? trim((string) $data['party_name']) : null,
             'vision_mission' => $this->sanitizeRichText($data['vision_mission'] ?? null),
             'photo_url' => $this->storePhoto($request, $data['candidate_number']),
         ]);
@@ -44,10 +86,27 @@ class CandidateController extends Controller
             return response()->json(['message' => 'Data paslon tidak ditemukan.'], 404);
         }
 
+        $electionId = $candidate->election_id ? (string) $candidate->election_id : null;
+        $election = $electionId ? Election::find($electionId) : null;
+
+        $uniqueRule = Rule::unique('mongodb.candidates', 'candidate_number')->ignore($id, '_id');
+        if ($electionId) {
+            $uniqueRule->where('election_id', $electionId);
+        }
+
+        $viceRule = (! $election || $election->position_type === Election::POSITION_BUPATI)
+            ? 'required|string|max:255'
+            : 'nullable|string|max:255';
+
+        $partyRule = ($election && $election->position_type === Election::POSITION_DPRD)
+            ? 'required|string|max:255'
+            : 'nullable|string|max:255';
+
         $data = $request->validate([
-            'candidate_number' => ['required', 'string', 'max:10', Rule::unique('mongodb.candidates', 'candidate_number')->ignore($id, '_id')],
+            'candidate_number' => ['required', 'string', 'max:10', $uniqueRule],
             'name' => 'required|string|max:255',
-            'vice_name' => 'required|string|max:255',
+            'vice_name' => $viceRule,
+            'party_name' => $partyRule,
             'vision_mission' => 'nullable|string',
             'photo' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:2048',
         ]);
@@ -62,7 +121,8 @@ class CandidateController extends Controller
         $candidate->update([
             'candidate_number' => $data['candidate_number'],
             'name' => $data['name'],
-            'vice_name' => $data['vice_name'],
+            'vice_name' => isset($data['vice_name']) && trim((string) $data['vice_name']) !== '' ? trim((string) $data['vice_name']) : null,
+            'party_name' => isset($data['party_name']) && trim((string) $data['party_name']) !== '' ? trim((string) $data['party_name']) : null,
             'vision_mission' => $this->sanitizeRichText($data['vision_mission'] ?? null),
             'photo_url' => $photoUrl,
         ]);
@@ -97,7 +157,7 @@ class CandidateController extends Controller
         }
 
         $file = $request->file('photo');
-        $fileName = 'paslon_'.time().'_'.$candidateNumber.'.'.$file->getClientOriginalExtension();
+        $fileName = 'paslon_'.time().'_'.substr(md5(uniqid('', true)), 0, 6).'_'.$candidateNumber.'.'.$file->getClientOriginalExtension();
         $file->move(public_path('images'), $fileName);
 
         return url('/images/'.$fileName);

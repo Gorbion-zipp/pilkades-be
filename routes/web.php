@@ -2,7 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 
-// Project ini hanya menyediakan API. Frontend ada di project pemira-web.
+// Project ini hanya menyediakan API. Frontend ada di project pilkades-web.
 Route::get('/', function () {
     return response()->json([
         'name' => config('app.name'),

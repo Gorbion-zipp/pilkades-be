@@ -3,52 +3,59 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Region;
 use App\Models\Voter;
-use DateTime;
+use App\Services\SpreadsheetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class VoterImportController extends Controller
 {
-    private const COLUMNS = ['nik', 'nama', 'tanggal_lahir', 'rt_rw'];
+    private const COLUMNS = ['nik', 'nama', 'tanggal_lahir', 'kabupaten', 'kecamatan', 'kelurahan', 'banjar'];
 
-    private const DATE_FORMATS = ['Y-m-d', 'd/m/Y', 'd-m-Y', 'Y/m/d', 'd.m.Y'];
+    public function __construct(private readonly SpreadsheetService $spreadsheet) {}
 
-    public function template(): StreamedResponse
+    public function template(Request $request): StreamedResponse
     {
-        $fileName = 'template-dpt-pemira-'.now()->format('Y-m-d').'.csv';
+        $format = strtolower($request->query('format', 'xlsx'));
+        $date = now()->format('Y-m-d');
 
-        return response()->streamDownload(function (): void {
-            $handle = fopen('php://output', 'wb');
+        $sampleRows = [
+            ['5103010101900011', 'I Wayan Dharma Putra', '1990-01-01', 'Kabupaten Badung', 'Kecamatan Kuta Utara', 'Desa Canggu', 'Banjar Canggu'],
+            ['5103011503880012', 'Ni Luh Putu Sari Dewi', '1988-03-15', 'Kabupaten Badung', 'Kecamatan Kuta Utara', 'Desa Canggu', 'Banjar Pipitan'],
+        ];
 
-            // BOM UTF-8 agar Excel membaca huruf beraksen dengan benar.
-            fwrite($handle, "\xEF\xBB\xBF");
+        if ($format === 'csv') {
+            return $this->spreadsheet->downloadCsv("template-dpt-pilkades-{$date}.csv", self::COLUMNS, $sampleRows);
+        }
 
-            fputcsv($handle, self::COLUMNS);
-            fputcsv($handle, ['5103010101900001', 'I Wayan Sudiarta', '1990-01-01', '001/002']);
-            fputcsv($handle, ['5103011503880002', 'Ni Luh Putu Anggreni', '1988-03-15', '002/002']);
-
-            fclose($handle);
-        }, $fileName, ['Content-Type' => 'text/csv; charset=UTF-8']);
+        // Indeks 0 (nik) dan 2 (tanggal_lahir) dipaksa sebagai teks agar Excel tidak mengubahnya.
+        return $this->spreadsheet->downloadXlsx("template-dpt-pilkades-{$date}.xlsx", self::COLUMNS, $sampleRows, [0, 2]);
     }
 
     /**
-     * Baca dan verifikasi berkas tanpa menyimpan apa pun.
+     * Baca dan verifikasi berkas (.xlsx, .xls, atau .csv) tanpa menyimpan apa pun.
      */
     public function preview(Request $request): JsonResponse
     {
         $request->validate(['file' => 'required|file|max:5120']);
 
         $file = $request->file('file');
+        $ext = strtolower($file->getClientOriginalExtension());
 
-        if (! in_array(strtolower($file->getClientOriginalExtension()), ['csv', 'txt'], true)) {
+        if (! in_array($ext, ['xlsx', 'xls', 'csv', 'txt'], true)) {
             return response()->json([
-                'message' => 'Format berkas harus .csv (simpan dari Excel dengan "CSV UTF-8").',
+                'message' => 'Format berkas harus Excel (.xlsx / .xls) atau CSV (.csv).',
             ], 422);
         }
 
-        $rows = $this->readCsv($file->getRealPath());
+        try {
+            $rows = $this->spreadsheet->readRows($file->getRealPath(), $ext);
+        } catch (RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
 
         if ($rows === []) {
             return response()->json([
@@ -72,12 +79,19 @@ class VoterImportController extends Controller
             'rows.*.nik' => 'required|string',
             'rows.*.name' => 'required|string',
             'rows.*.birth_date' => 'required|string',
-            'rows.*.rt_rw' => 'nullable|string',
+            'rows.*.banjar_id' => 'required|string',
         ]);
 
         $existingNik = Voter::whereIn('nik', array_column($request->input('rows'), 'nik'))
             ->pluck('nik')
             ->map(fn ($nik) => (string) $nik)
+            ->all();
+
+        $banjarIds = array_values(array_unique(array_column($request->input('rows'), 'banjar_id')));
+        $banjarMap = Region::whereIn('_id', $banjarIds)
+            ->where('level', Region::LEVEL_BANJAR)
+            ->get()
+            ->keyBy(fn (Region $r) => (string) $r->_id)
             ->all();
 
         $payload = [];
@@ -88,10 +102,11 @@ class VoterImportController extends Controller
         foreach ($request->input('rows') as $row) {
             $nik = trim((string) $row['nik']);
             $name = trim((string) $row['name']);
-            $birthDate = $this->normalizeBirthDate((string) $row['birth_date']);
-            $rtRw = isset($row['rt_rw']) ? trim((string) $row['rt_rw']) : '';
+            $birthDate = $this->spreadsheet->normalizeDate((string) $row['birth_date']);
+            $banjarId = trim((string) $row['banjar_id']);
+            $banjar = $banjarMap[$banjarId] ?? null;
 
-            $invalid = $this->findRowError($nik, $name, (string) $row['birth_date'], $rtRw) !== null;
+            $invalid = $this->findIdentityError($nik, $name, (string) $row['birth_date']) !== null || $banjar === null;
 
             if ($invalid || $birthDate === null || isset($seenNik[$nik]) || in_array($nik, $existingNik, true)) {
                 $skipped++;
@@ -105,7 +120,10 @@ class VoterImportController extends Controller
                 'nik' => $nik,
                 'name' => $name,
                 'birth_date' => $birthDate,
-                'rt_rw' => $rtRw === '' ? null : $rtRw,
+                'kabupaten_id' => $banjar->kabupaten_id,
+                'kecamatan_id' => $banjar->kecamatan_id,
+                'kelurahan_id' => $banjar->kelurahan_id,
+                'banjar_id' => (string) $banjar->_id,
                 'has_voted' => false,
                 'created_at' => $timestamp,
                 'updated_at' => $timestamp,
@@ -136,51 +154,6 @@ class VoterImportController extends Controller
     }
 
     /**
-     * @return array<int, array{line: int, values: array<int, string>}>
-     */
-    private function readCsv(string $path): array
-    {
-        $contents = file_get_contents($path);
-
-        if ($contents === false || trim($contents) === '') {
-            return [];
-        }
-
-        $contents = preg_replace('/^\xEF\xBB\xBF/', '', $contents);
-
-        $handle = fopen('php://temp', 'r+b');
-        fwrite($handle, (string) $contents);
-        rewind($handle);
-
-        $firstLine = (string) fgets($handle);
-        $delimiter = substr_count($firstLine, ';') > substr_count($firstLine, ',') ? ';' : ',';
-        rewind($handle);
-
-        $rows = [];
-        $line = 0;
-
-        while (($values = fgetcsv($handle, 0, $delimiter)) !== false) {
-            $line++;
-
-            if ($line === 1) {
-                continue;
-            }
-
-            $values = array_map(fn ($value): string => trim((string) $value), $values);
-
-            if (implode('', $values) === '') {
-                continue;
-            }
-
-            $rows[] = ['line' => $line, 'values' => $values];
-        }
-
-        fclose($handle);
-
-        return $rows;
-    }
-
-    /**
      * Klasifikasikan setiap baris: valid, tidak valid, ganda dalam berkas,
      * atau sudah terdaftar di DPT.
      *
@@ -190,6 +163,7 @@ class VoterImportController extends Controller
     private function verifyRows(array $rows): array
     {
         $existingNik = Voter::pluck('nik')->map(fn ($nik) => (string) $nik)->all();
+        $regionLookup = $this->buildRegionLookup();
 
         $validRows = [];
         $preview = [];
@@ -203,10 +177,21 @@ class VoterImportController extends Controller
             $nik = $row['values'][0] ?? '';
             $name = $row['values'][1] ?? '';
             $rawBirthDate = $row['values'][2] ?? '';
-            $rtRw = $row['values'][3] ?? '';
+            $rawKab = $row['values'][3] ?? '';
+            $rawKec = $row['values'][4] ?? '';
+            $rawKel = $row['values'][5] ?? '';
+            $rawBanjar = $row['values'][6] ?? '';
 
-            if ($reason = $this->findRowError($nik, $name, $rawBirthDate, $rtRw)) {
+            if ($reason = $this->findIdentityError($nik, $name, $rawBirthDate)) {
                 $invalid[] = ['line' => $line, 'nik' => $nik, 'name' => $name, 'reason' => $reason];
+
+                continue;
+            }
+
+            [$resolved, $regionError] = $this->resolveRegionHierarchy($regionLookup, $rawKab, $rawKec, $rawKel, $rawBanjar);
+
+            if ($regionError !== null || $resolved === null) {
+                $invalid[] = ['line' => $line, 'nik' => $nik, 'name' => $name, 'reason' => $regionError ?? 'Wilayah tidak valid.'];
 
                 continue;
             }
@@ -234,13 +219,16 @@ class VoterImportController extends Controller
             }
 
             $seenNik[$nik] = $line;
-            $birthDate = $this->normalizeBirthDate($rawBirthDate);
+            $birthDate = $this->spreadsheet->normalizeDate($rawBirthDate);
 
             $validRows[] = [
                 'nik' => $nik,
                 'name' => $name,
                 'birth_date' => $birthDate,
-                'rt_rw' => $rtRw === '' ? null : $rtRw,
+                'kabupaten_id' => (string) $resolved['kabupaten']->_id,
+                'kecamatan_id' => (string) $resolved['kecamatan']->_id,
+                'kelurahan_id' => (string) $resolved['kelurahan']->_id,
+                'banjar_id' => (string) $resolved['banjar']->_id,
             ];
 
             $preview[] = [
@@ -248,7 +236,10 @@ class VoterImportController extends Controller
                 'nik' => $nik,
                 'name' => $name,
                 'birth_date' => $birthDate,
-                'rt_rw' => $rtRw === '' ? '-' : $rtRw,
+                'kabupaten_name' => $resolved['kabupaten']->name,
+                'kecamatan_name' => $resolved['kecamatan']->name,
+                'kelurahan_name' => $resolved['kelurahan']->name,
+                'banjar_name' => $resolved['banjar']->name,
             ];
         }
 
@@ -263,7 +254,7 @@ class VoterImportController extends Controller
         ];
     }
 
-    private function findRowError(string $nik, string $name, string $birthDate, string $rtRw): ?string
+    private function findIdentityError(string $nik, string $name, string $birthDate): ?string
     {
         if ($nik === '') {
             return 'Kolom NIK wajib diisi.';
@@ -290,33 +281,89 @@ class VoterImportController extends Controller
             return 'Kolom tanggal lahir wajib diisi (dipakai pemilih untuk login).';
         }
 
-        if ($this->normalizeBirthDate($birthDate) === null) {
-            return 'Tanggal lahir "'.$birthDate.'" tidak valid. Gunakan format YYYY-MM-DD.';
-        }
-
-        if (mb_strlen($rtRw) > 50) {
-            return 'RT/RW melebihi 50 karakter.';
+        if ($this->spreadsheet->normalizeDate($birthDate) === null) {
+            return 'Tanggal lahir "'.$birthDate.'" tidak valid. Gunakan format YYYY-MM-DD atau DD/MM/YYYY.';
         }
 
         return null;
     }
 
-    private function normalizeBirthDate(string $value): ?string
+    /**
+     * Bangun indeks wilayah in-memory untuk lookup cepat per (level, parent_id).
+     *
+     * @return array<string, array<string, array<string, Region>>>
+     */
+    private function buildRegionLookup(): array
     {
-        $value = trim($value);
+        $lookup = [];
 
-        if ($value === '') {
-            return null;
+        foreach (Region::all() as $region) {
+            $level = (string) $region->level;
+            $parentKey = $region->parent_id ? (string) $region->parent_id : '_root';
+
+            $exactKey = mb_strtolower(trim((string) $region->name));
+            $strippedKey = Region::normalizeName((string) $region->name, $level);
+
+            $lookup[$level][$parentKey]['exact'][$exactKey] = $region;
+            $lookup[$level][$parentKey]['stripped'][$strippedKey] = $region;
         }
 
-        foreach (self::DATE_FORMATS as $format) {
-            $date = DateTime::createFromFormat('!'.$format, $value);
+        return $lookup;
+    }
 
-            if ($date !== false && $date->format($format) === $value) {
-                return $date->format('Y-m-d');
-            }
+    /**
+     * @param  array<string, mixed>  $lookup
+     */
+    private function findRegionMatch(array $lookup, string $level, string $parentKey, string $input): ?Region
+    {
+        $exactKey = mb_strtolower(trim($input));
+        if (isset($lookup[$level][$parentKey]['exact'][$exactKey])) {
+            return $lookup[$level][$parentKey]['exact'][$exactKey];
+        }
+
+        $strippedKey = Region::normalizeName($input, $level);
+        if (isset($lookup[$level][$parentKey]['stripped'][$strippedKey])) {
+            return $lookup[$level][$parentKey]['stripped'][$strippedKey];
         }
 
         return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $lookup
+     * @return array{0: array<string, Region>|null, 1: string|null}
+     */
+    private function resolveRegionHierarchy(array $lookup, string $rawKab, string $rawKec, string $rawKel, string $rawBanjar): array
+    {
+        if ($rawKab === '' || $rawKec === '' || $rawKel === '' || $rawBanjar === '') {
+            return [null, 'Kolom kabupaten, kecamatan, kelurahan, dan banjar wajib diisi lengkap.'];
+        }
+
+        $kab = $this->findRegionMatch($lookup, Region::LEVEL_KABUPATEN, '_root', $rawKab);
+        if (! $kab) {
+            return [null, 'Kabupaten/Kota "'.$rawKab.'" tidak ditemukan di Data Master Wilayah Bali.'];
+        }
+
+        $kec = $this->findRegionMatch($lookup, Region::LEVEL_KECAMATAN, (string) $kab->_id, $rawKec);
+        if (! $kec) {
+            return [null, 'Kecamatan "'.$rawKec.'" tidak ditemukan di bawah '.$kab->name.'.'];
+        }
+
+        $kel = $this->findRegionMatch($lookup, Region::LEVEL_KELURAHAN, (string) $kec->_id, $rawKel);
+        if (! $kel) {
+            return [null, 'Kelurahan/Desa "'.$rawKel.'" tidak ditemukan di bawah '.$kec->name.'.'];
+        }
+
+        $banjar = $this->findRegionMatch($lookup, Region::LEVEL_BANJAR, (string) $kel->_id, $rawBanjar);
+        if (! $banjar) {
+            return [null, 'Banjar/Lingkungan "'.$rawBanjar.'" tidak ditemukan di bawah '.$kel->name.'.'];
+        }
+
+        return [[
+            'kabupaten' => $kab,
+            'kecamatan' => $kec,
+            'kelurahan' => $kel,
+            'banjar' => $banjar,
+        ], null];
     }
 }

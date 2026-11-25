@@ -15,6 +15,8 @@ class Vote extends Model
     protected $collection = 'votes';
 
     protected $fillable = [
+        'election_id',
+        'election_round_id',
         'candidate_id',
     ];
 }

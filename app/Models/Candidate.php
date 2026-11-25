@@ -11,9 +11,11 @@ class Candidate extends Model
     protected $collection = 'candidates';
 
     protected $fillable = [
+        'election_id',
         'candidate_number',
         'name',
         'vice_name',
+        'party_name',
         'vision_mission',
         'photo_url',
     ];
@@ -32,9 +34,11 @@ class Candidate extends Model
     {
         return [
             'id' => (string) $this->_id,
+            'election_id' => $this->election_id ? (string) $this->election_id : null,
             'candidate_number' => $this->candidate_number,
             'name' => $this->name,
             'vice_name' => $this->vice_name,
+            'party_name' => $this->party_name,
             'vision_mission' => $this->vision_mission,
             'photo_url' => $this->photo_url,
             'votes' => $voteCount,

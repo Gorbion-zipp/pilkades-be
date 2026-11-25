@@ -1,7 +1,7 @@
-# Pemira API (Backend)
+# Pilkades API (Backend)
 
 REST API untuk sistem E-Voting Pilkades. Stateless, autentikasi JWT, database MongoDB.
-Tidak menyajikan HTML apa pun — frontend ada di project `pemira-web`.
+Tidak menyajikan HTML apa pun — frontend ada di project `pilkades-web`.
 
 ## Menjalankan
 
@@ -21,7 +21,7 @@ php artisan serve
 | Variabel           | Keterangan                                                  |
 | ------------------ | ----------------------------------------------------------- |
 | `MONGODB_URI`      | Connection string Atlas (`mongodb+srv://...`)               |
-| `MONGODB_DATABASE` | Nama database, default `pemira`                             |
+| `MONGODB_DATABASE` | Nama database, default `pilkades`                           |
 | `JWT_SECRET`       | Kunci penandatangan token, wajib diisi                      |
 | `JWT_TTL`          | Masa berlaku token dalam detik, default 7200                |
 | `FRONTEND_URL`     | Origin yang diizinkan CORS, default `http://localhost:5173` |
@@ -99,7 +99,7 @@ php artisan test
 ```
 
 `JwtAuthTest` berjalan tanpa database. Tes lainnya memerlukan MongoDB yang aktif
-dan memakai database `pemira_test` (lihat `phpunit.xml`).
+dan memakai database `pilkades_test` (lihat `phpunit.xml`).
 
 ## Author
 
